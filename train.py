@@ -35,6 +35,22 @@ from dataset import LidarDataset, build_dataloaders
 from losses import CombinedLoss
 
 
+def unwrap_model(model):
+    """Return the underlying module when torch.compile wraps the model."""
+    return getattr(model, "_orig_mod", model)
+
+
+def normalize_state_dict_keys(state_dict):
+    """Strip torch.compile wrapper prefixes when present."""
+    if not state_dict:
+        return state_dict
+
+    keys = list(state_dict.keys())
+    if all(k.startswith("_orig_mod.") for k in keys):
+        return {k[len("_orig_mod."):]: v for k, v in state_dict.items()}
+    return state_dict
+
+
 def compute_iou(pred, target, num_classes):
     """Calcule l'IoU par classe."""
     ious = []
@@ -310,7 +326,9 @@ def main():
         ckpt = torch.load(warm_start_path, map_location=device, weights_only=False)
         # Vérifier compatibilité architecture
         try:
-            model.load_state_dict(ckpt["model_state_dict"])
+            unwrap_model(model).load_state_dict(
+                normalize_state_dict_keys(ckpt["model_state_dict"])
+            )
             start_epoch = ckpt.get("epoch", 0) + 1
             # NE PAS hériter du best_miou du checkpoint : si les features ont changé
             # (distribution différente → val_miou démarre plus bas), on ne veut pas
@@ -434,7 +452,7 @@ def main():
                 patience_counter = 0
                 ckpt = {
                     "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
+                    "model_state_dict": unwrap_model(model).state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "val_miou": mean_miou_4d,          # mIoU moyen 4 densités
                     "val_miou_per_density": miou_per_density,
@@ -460,7 +478,7 @@ def main():
         # Sauvegarder dernier modèle aussi
         torch.save({
             "epoch": epoch,
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": unwrap_model(model).state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "val_miou": val_miou,
         }, os.path.join(cfg.checkpoint_dir, "last_model.pth"))

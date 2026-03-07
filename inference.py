@@ -24,6 +24,17 @@ from config import Config
 from model import RandLANet
 
 
+def normalize_state_dict_keys(state_dict):
+    """Strip torch.compile wrapper prefixes when present."""
+    if not state_dict:
+        return state_dict
+
+    keys = list(state_dict.keys())
+    if all(k.startswith("_orig_mod.") for k in keys):
+        return {k[len("_orig_mod."):]: v for k, v in state_dict.items()}
+    return state_dict
+
+
 def load_model(checkpoint_path, device, cfg=None):
     """Charge le modèle depuis un checkpoint."""
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -36,7 +47,8 @@ def load_model(checkpoint_path, device, cfg=None):
         num_layers=model_cfg.get("num_layers", cfg.num_layers if cfg else 4),
     ).to(device)
 
-    model.load_state_dict(checkpoint["model_state_dict"])
+    state_dict = normalize_state_dict_keys(checkpoint["model_state_dict"])
+    model.load_state_dict(state_dict)
     model.eval()
     print(f"Modèle chargé: {checkpoint_path}")
     print(f"  Epoch: {checkpoint.get('epoch', '?')}, "
