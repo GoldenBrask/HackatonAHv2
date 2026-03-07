@@ -13,15 +13,25 @@ import os
 import sys
 import json
 import time
+from copy import copy
+
+# Evite l'oversubscription CPU dans les workers DataLoader quand NumPy/SciPy
+# lancent eux-memes des threads BLAS.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.amp import autocast, GradScaler
+from torch.utils.data import DataLoader
 
 from config import Config
 from model import RandLANet, count_parameters
-from dataset import build_dataloaders
+from dataset import LidarDataset, build_dataloaders
 from losses import CombinedLoss
 
 
@@ -173,6 +183,48 @@ def validate_multi_density(model, val_loader, criterion, device, cfg):
     return mean_miou, results
 
 
+def validate_multi_density_fast(model, val_file_list, criterion, device, cfg):
+    """Validation 4 densites sans mutation de cfg partage.
+
+    Chaque densite recoit son propre Dataset avec une copie de config fixe.
+    On peut ainsi garder des workers multiprocess sans bug de copie de cfg,
+    tout en evitant la validation 50% en double dans la boucle principale.
+    """
+    densities = [0.25, 0.50, 0.75, 1.00]
+    results = {}
+    details = {}
+
+    for d in densities:
+        density_cfg = copy(cfg)
+        density_cfg.val_density = d
+        density_dataset = LidarDataset(val_file_list, training=False, cfg=density_cfg)
+
+        loader_kwargs = {
+            "batch_size": cfg.batch_size,
+            "shuffle": False,
+            "num_workers": cfg.num_workers,
+            "pin_memory": cfg.pin_memory,
+            "drop_last": False,
+        }
+        if cfg.num_workers > 0:
+            loader_kwargs["persistent_workers"] = False
+            loader_kwargs["prefetch_factor"] = 3
+
+        density_loader = DataLoader(density_dataset, **loader_kwargs)
+        loss_d, miou_d, ious_d = validate(
+            model, density_loader, criterion, device, cfg
+        )
+        results[d] = miou_d
+        details[d] = {
+            "loss": loss_d,
+            "miou": miou_d,
+            "ious": ious_d,
+        }
+
+    mean_miou = float(np.mean(list(results.values())))
+    return mean_miou, results, details
+
+
 def get_cosine_lr(epoch, warmup_epochs, total_epochs, base_lr, min_lr=1e-6):
     """Cosine annealing avec warmup linéaire."""
     if epoch < warmup_epochs:
@@ -210,6 +262,7 @@ def main():
     # ── Data ──
     print("\nChargement des données...")
     train_loader, val_loader = build_dataloaders(cfg)
+    val_file_list = list(val_loader.dataset.file_list)
 
     # ── Modèle ──
     model = RandLANet(
@@ -318,17 +371,26 @@ def main():
         )
 
         # Validate — val simple à cfg.val_density (rapide, chaque epoch)
-        val_loss, val_miou, val_ious = validate(
-            model, val_loader, criterion, device, cfg
-        )
+        run_multi = ((epoch + 1) % val_multi_freq == 0) or (epoch == start_epoch)
+        if not run_multi:
+            val_loss, val_miou, val_ious = validate(
+                model, val_loader, criterion, device, cfg
+            )
+        else:
+            val_loss = val_miou = val_ious = None
 
         # Validate multi-densité (toutes les val_multi_freq epochs)
         # C'est ce critère qui pilote le checkpointing.
         run_multi = ((epoch + 1) % val_multi_freq == 0) or (epoch == start_epoch)
         if run_multi:
-            mean_miou_4d, miou_per_density = validate_multi_density(
-                model, val_loader, criterion, device, cfg
+            mean_miou_4d, miou_per_density, density_details = validate_multi_density_fast(
+                model, val_file_list, criterion, device, cfg
             )
+            val_detail = density_details.get(cfg.val_density)
+            if val_detail is not None:
+                val_loss = val_detail["loss"]
+                val_miou = val_detail["miou"]
+                val_ious = val_detail["ious"]
         else:
             mean_miou_4d = None
             miou_per_density = None

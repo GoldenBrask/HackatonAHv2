@@ -57,7 +57,7 @@ class Config:
     # Run 11: cold start obligatoire — features on-the-fly incompatibles avec checkpoint Run 8
     # Le modèle doit apprendre de zéro avec des geo features calculées à la densité réelle
     warm_start = False
-    num_workers = 8
+    num_workers = 12         # 32 vCPU tuning: plus de debit dataloader sans changer la qualite
     pin_memory = True
     grad_clip_norm = 2.0       # Run 8: 10.0→2.0 (meilleure stabilité classes rares)
     use_amp = True             # Mixed precision (2x speed sur L4)
