@@ -279,7 +279,7 @@ def compute_obb(points):
     return center, best_w, best_l, height, best_angle
 
 
-def cluster_and_bbox(xyz, pred_classes, cfg, probs=None, density=1.0):
+def cluster_and_bbox_legacy(xyz, pred_classes, cfg, probs=None, density=1.0):
     """
     Pour chaque classe (0-3), DBSCAN sur les points prédits,
     puis OBB sur chaque cluster.
@@ -348,6 +348,158 @@ def cluster_and_bbox(xyz, pred_classes, cfg, probs=None, density=1.0):
 
             center, w, l, h, yaw = compute_obb(cluster_points)
 
+            detections.append({
+                "class_ID":      class_id,
+                "class_label":   cfg.class_labels[class_id],
+                "bbox_center_x": float(center[0]),
+                "bbox_center_y": float(center[1]),
+                "bbox_center_z": float(center[2]),
+                "bbox_width":    float(w),
+                "bbox_length":   float(l),
+                "bbox_height":   float(h),
+                "bbox_yaw":      float(yaw),
+            })
+
+    return detections
+
+
+def get_cluster_settings(class_id, density, cfg):
+    """Prepare class-specific clustering settings for the current density."""
+    conf_thresholds = getattr(cfg, "confidence_threshold", {})
+    params = cfg.dbscan_params[class_id]
+
+    min_pts = cfg.min_cluster_points.get(class_id, 10)
+    min_conf = conf_thresholds.get(class_id, 0.0)
+    min_samples = params["min_samples"]
+
+    density_overrides = {}
+    if class_id == 0:
+        density_overrides = getattr(cfg, "antenna_density_params", {})
+    elif class_id == 1:
+        density_overrides = getattr(cfg, "cable_density_params", {})
+
+    if density_overrides and density < 0.99:
+        for threshold in sorted(density_overrides.keys()):
+            if density <= threshold:
+                override = density_overrides[threshold]
+                min_samples = override["min_samples"]
+                min_pts = override["min_cluster"]
+                min_conf = override["confidence"]
+                break
+
+    cluster_space = getattr(cfg, "cluster_space", {}).get(
+        class_id, "xy" if class_id in (0, 2) else "xyz"
+    )
+    core_threshold = getattr(cfg, "cluster_core_threshold", {}).get(class_id, min_conf)
+    support_threshold = getattr(
+        cfg, "cluster_support_threshold", {}
+    ).get(class_id, max(min_conf * 0.6, 0.20))
+    min_core_points = getattr(
+        cfg, "cluster_min_core_points", {}
+    ).get(class_id, max(2, min_pts // 4))
+    support_radius = getattr(
+        cfg, "cluster_support_radius", {}
+    ).get(class_id, params["eps"])
+
+    if density < 1.0:
+        conf_scale = 0.90 + 0.10 * density
+        core_threshold *= conf_scale
+        support_threshold *= conf_scale
+        min_core_points = max(
+            int(np.ceil(min_core_points * max(density ** 0.5, 0.60))),
+            2,
+        )
+
+    core_threshold = float(np.clip(core_threshold, 0.05, 0.95))
+    support_threshold = float(
+        np.clip(min(support_threshold, core_threshold), 0.05, core_threshold)
+    )
+
+    return {
+        "eps": params["eps"],
+        "min_samples": min_samples,
+        "min_pts": min_pts,
+        "min_conf": min_conf,
+        "cluster_space": cluster_space,
+        "core_threshold": core_threshold,
+        "support_threshold": support_threshold,
+        "min_core_points": min_core_points,
+        "support_radius": max(float(support_radius), float(params["eps"])),
+    }
+
+
+def build_candidate_masks(xyz, pred_classes, probs, class_id, settings):
+    """Select core points plus nearby support points for one class."""
+    if probs is None:
+        mask = pred_classes == class_id
+        return mask, mask
+
+    class_scores = probs[:, class_id]
+    core_mask = (pred_classes == class_id) | (class_scores >= settings["core_threshold"])
+    if not core_mask.any():
+        return core_mask, core_mask
+
+    support_mask = class_scores >= settings["support_threshold"]
+    candidate_mask = core_mask.copy()
+
+    extra_support_idx = np.flatnonzero(support_mask & ~candidate_mask)
+    if extra_support_idx.size > 0:
+        core_tree = cKDTree(xyz[core_mask])
+        distances, _ = core_tree.query(xyz[extra_support_idx], k=1)
+        candidate_mask[extra_support_idx[distances <= settings["support_radius"]]] = True
+
+    return candidate_mask, core_mask
+
+
+def cluster_and_bbox(xyz, pred_classes, cfg, probs=None, density=1.0):
+    """Extract obstacle instances and convert them to oriented boxes."""
+    use_probabilistic = bool(getattr(cfg, "use_probabilistic_clustering", True))
+    if not use_probabilistic:
+        return cluster_and_bbox_legacy(
+            xyz, pred_classes, cfg, probs=probs, density=density
+        )
+
+    detections = []
+
+    for class_id in range(4):
+        settings = get_cluster_settings(class_id, density, cfg)
+        candidate_mask, core_mask = build_candidate_masks(
+            xyz, pred_classes, probs, class_id, settings
+        )
+
+        if candidate_mask.sum() < settings["min_pts"]:
+            continue
+
+        points = xyz[candidate_mask]
+        cls_probs = probs[candidate_mask, class_id] if probs is not None else None
+        local_core_mask = core_mask[candidate_mask]
+        cluster_input = points[:, :2] if settings["cluster_space"] == "xy" else points
+
+        clustering = DBSCAN(
+            eps=settings["eps"],
+            min_samples=settings["min_samples"],
+            n_jobs=-1,
+        ).fit(cluster_input)
+
+        labels = clustering.labels_
+        unique_labels = set(labels) - {-1}
+
+        for label in unique_labels:
+            cluster_mask = labels == label
+            cluster_points = points[cluster_mask]
+
+            if len(cluster_points) < settings["min_pts"]:
+                continue
+
+            if int(local_core_mask[cluster_mask].sum()) < settings["min_core_points"]:
+                continue
+
+            if cls_probs is not None and settings["min_conf"] > 0.0:
+                confidence = float(cls_probs[cluster_mask].mean())
+                if confidence < settings["min_conf"]:
+                    continue
+
+            center, w, l, h, yaw = compute_obb(cluster_points)
             detections.append({
                 "class_ID":      class_id,
                 "class_label":   cfg.class_labels[class_id],
@@ -514,13 +666,19 @@ def main():
     parser.add_argument("--density", type=float, default=None,
                         help="Ratio de densité [0.25|0.50|0.75|1.0]. "
                              "Si omis, auto-détection via suffixe _25/_50/_75/_100.h5.")
+    parser.add_argument("--legacy-clustering", action="store_true",
+                        help="Revenir au DBSCAN legacy sur l'argmax brut")
     args = parser.parse_args()
 
     cfg = Config()
     cfg.ensure_dirs()
+    cfg.use_probabilistic_clustering = not args.legacy_clustering
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+    print("Clustering: " + (
+        "probabilistic-v3" if cfg.use_probabilistic_clustering else "legacy-dbscan"
+    ))
 
     model = load_model(args.checkpoint, device, cfg)
     density = resolve_density(args.input, args.density)
