@@ -1,0 +1,10 @@
+python visualize.py --file airbus_hackathon_evalset/eval_sceneB_75.h5 --pose-index 92
+python visualize.py --file airbus_hackathon_evalset/eval_sceneB_75.h5 --pose-index 45
+python visualize.py --file airbus_hackathon_evalset/eval_sceneB_75.h5 --pose-index 32
+python visualize.py --file airbus_hackathon_evalset/eval_sceneB_75.h5 --pose-index 37
+python visualize.py --file airbus_hackathon_evalset/eval_sceneB_75.h5 --pose-index 52
+python visualize.py --file airbus_hackathon_evalset/eval_sceneB_75.h5 --pose-index 51
+python visualize.py --file airbus_hackathon_evalset/eval_sceneB_75.h5 --pose-index 14
+python visualize.py --file airbus_hackathon_evalset/eval_sceneB_75.h5 --pose-index 67
+python visualize.py --file airbus_hackathon_evalset/eval_sceneB_75.h5 --pose-index 98
+python visualize.py --file airbus_hackathon_evalset/eval_sceneB_75.h5 --pose-index 69

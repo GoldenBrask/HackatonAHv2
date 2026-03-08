@@ -1,0 +1,9 @@
+file,frames,frames_with_detections,total_detections,antenna_count,cable_count,pole_count,turbine_count,max_total_per_frame,max_cable_per_frame,max_cable_length
+eval_sceneA_100.csv,99,88,393,45,203,22,123,23,20,4.066452026367188
+eval_sceneA_25.csv,99,85,338,45,154,13,126,23,21,4.019889831542969
+eval_sceneA_50.csv,99,86,405,43,235,18,109,27,25,4.2839460372924805
+eval_sceneA_75.csv,99,89,396,41,223,19,113,25,21,4.061614990234375
+eval_sceneB_100.csv,99,78,441,52,274,20,95,68,65,4.01506233215332
+eval_sceneB_25.csv,99,81,438,54,260,13,111,87,82,3.988327026367188
+eval_sceneB_50.csv,99,81,493,56,335,16,86,94,89,4.435474395751953
+eval_sceneB_75.csv,99,79,467,52,302,22,91,86,82,4.009191513061523

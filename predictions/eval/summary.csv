@@ -1,0 +1,9 @@
+mode,file,scene,density,num_detections,antenna,cable,electric_pole,wind_turbine,elapsed_sec,status
+probabilistic,eval_sceneA_100.h5,A,100,393,45,203,22,123,406.17,done
+probabilistic,eval_sceneA_75.h5,A,75,396,41,223,19,113,355.28,done
+probabilistic,eval_sceneA_50.h5,A,50,405,43,235,18,109,300.63,done
+probabilistic,eval_sceneA_25.h5,A,25,338,45,154,13,126,206.39,done
+probabilistic,eval_sceneB_100.h5,B,100,441,52,274,20,95,401.41,done
+probabilistic,eval_sceneB_75.h5,B,75,467,52,302,22,91,356.25,done
+probabilistic,eval_sceneB_50.h5,B,50,493,56,335,16,86,300.77,done
+probabilistic,eval_sceneB_25.h5,B,25,438,54,260,13,111,206.49,done
