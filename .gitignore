@@ -8,17 +8,15 @@ venv/
 env/
 .env
 
+# Raw Airbus datasets
 airbus_hackathon_trainingdata/
-processed_data/
-checkpoints/
-predictions/
-logs/
-
+airbus_hackathon_evalset/
 *.h5
-*.npz
-*.pth
-*.pt
-*.onnx
-*.csv
 
+# Derived training tensors / caches
+processed_data/
+*.npz
+
+# Local runtime noise
+logs/
 .ipynb_checkpoints/
