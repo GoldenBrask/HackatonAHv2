@@ -172,13 +172,14 @@ class Config:
     }
 
     # Adaptive DBSCAN câble selon densité (lookup table par seuil)
-    # Les premiers tests sur l'eval set montrent une inflation des détections câble
-    # quand la densité baisse, surtout sur la scène B. On reste donc adaptatif à
-    # basse densité, mais avec des seuils plus conservateurs qu'avant pour limiter
-    # la fragmentation et les FP.
+    # Ajustement fin après tests eval set:
+    # - la version précédente a bien calmé les FP à 25%, surtout sur scene B
+    # - mais elle a aussi trop réduit le rappel câble à 50%/25%
+    # On revient donc vers un compromis un peu plus permissif, ciblé uniquement
+    # sur les densités basses, sans retoucher 75%/100%.
     cable_density_params = {
-        0.30: {"min_samples": 5, "min_cluster": 6, "confidence": 0.40},  # ≤30% (~25%) plus conservateur
-        0.55: {"min_samples": 7, "min_cluster": 6, "confidence": 0.42},  # ≤55% (~50%)
+        0.30: {"min_samples": 4, "min_cluster": 5, "confidence": 0.38},  # ≤30% (~25%) compromis recall/FP
+        0.55: {"min_samples": 6, "min_cluster": 5, "confidence": 0.41},  # ≤55% (~50%)
         0.80: {"min_samples": 8, "min_cluster": 6, "confidence": 0.44},  # ≤80% (~75%)
         # >80% → params normaux (min_samples=10, min_cluster=8, confidence=0.45)
     }
