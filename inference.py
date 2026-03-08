@@ -527,15 +527,27 @@ def cluster_and_bbox(xyz, pred_classes, cfg, probs=None, density=1.0):
     return detections
 
 
-def process_file(model, input_path, output_path, device, cfg, use_tta=True, density=1.0):
+def process_file(
+    model,
+    input_path,
+    output_path,
+    device,
+    cfg,
+    use_tta=True,
+    density=1.0,
+    simulate_density=None,
+):
     """Traite un fichier HDF5 complet et génère le CSV.
 
-    density : ratio de densité [0.25-1.0] pour tester la robustesse.
-              1.0 = 100% des points (normal), 0.25 = 25% des points (hackathon worst case).
+    density : densité effective [0.25-1.0] utilisée pour adapter le clustering.
+              1.0 = 100% des points, 0.25 = 25% des points.
+    simulate_density : si non-None, applique en plus un sous-échantillonnage aléatoire
+                       pour simuler une densité plus faible à partir du fichier d'entrée.
     """
     print(f"\nTraitement: {input_path}")
-    if density < 1.0:
-        print(f"  Densité simulée: {density*100:.0f}% des points")
+    print(f"  Densité prise en compte: {density*100:.0f}%")
+    if simulate_density is not None and simulate_density < 1.0:
+        print(f"  Sous-échantillonnage simulé: {simulate_density*100:.0f}% des points")
 
     df = lidar_utils.load_h5_data(input_path)
     print(f"  Points totaux: {len(df):,}")
@@ -573,10 +585,12 @@ def process_file(model, input_path, output_path, device, cfg, use_tta=True, dens
         # Features de base (xyz + refl + dist) sur frame voxelisé
         features = prepare_features(xyz, refl, dist, cfg)  # (N, 5)
 
-        # Réduction de densité (test robustesse hackathon)
-        if density < 1.0:
+        # Réduction de densité synthétique (uniquement si explicitement demandée).
+        # Les fichiers officiels Airbus _25/_50/_75 sont déjà downsamplés :
+        # on ne doit PAS les sous-échantillonner une seconde fois.
+        if simulate_density is not None and simulate_density < 1.0:
             np.random.seed(pose_idx)  # Reproductible par frame
-            n_keep = max(int(len(xyz) * density), 100)
+            n_keep = max(int(len(xyz) * simulate_density), 100)
             keep_idx = np.random.choice(len(xyz), n_keep, replace=False)
             xyz      = xyz[keep_idx]
             features = features[keep_idx]
@@ -643,15 +657,13 @@ def process_file(model, input_path, output_path, device, cfg, use_tta=True, dens
     return len(all_rows)
 
 
-def resolve_density(input_path, density):
-    """Détermine la densité cible.
+def resolve_input_density(input_path):
+    """Détermine la densité native du fichier d'entrée.
 
-    Si --density est fourni, on le respecte. Sinon, on tente une auto-détection
-    à partir des suffixes officiels Airbus (_25/_50/_75/_100.h5).
+    Détection via suffixes officiels Airbus (_25/_50/_75/_100.h5).
+    Cette valeur sert à adapter le clustering, mais ne déclenche pas de
+    sous-échantillonnage supplémentaire.
     """
-    if density is not None:
-        return density
-
     filename = os.path.basename(input_path).lower()
     suffix_map = {
         "_25.h5": 0.25,
@@ -661,7 +673,7 @@ def resolve_density(input_path, density):
     }
     for suffix, value in suffix_map.items():
         if filename.endswith(suffix):
-            print(f"Densité auto-détectée depuis le nom de fichier: {value:.0%}")
+            print(f"Densité d'entrée auto-détectée depuis le nom de fichier: {value:.0%}")
             return value
 
     return 1.0
@@ -676,8 +688,9 @@ def main():
     parser.add_argument("--no-tta", action="store_true",
                         help="Désactiver Test-Time Augmentation")
     parser.add_argument("--density", type=float, default=None,
-                        help="Ratio de densité [0.25|0.50|0.75|1.0]. "
-                             "Si omis, auto-détection via suffixe _25/_50/_75/_100.h5.")
+                        help="Simule une densité cible [0.25|0.50|0.75|1.0] "
+                             "par sous-échantillonnage supplémentaire. "
+                             "À utiliser pour tester la robustesse depuis un fichier 100%.")
     parser.add_argument("--legacy-clustering", action="store_true",
                         help="Revenir au DBSCAN legacy sur l'argmax brut")
     args = parser.parse_args()
@@ -693,9 +706,12 @@ def main():
     ))
 
     model = load_model(args.checkpoint, device, cfg)
-    density = resolve_density(args.input, args.density)
+    input_density = resolve_input_density(args.input)
+    effective_density = args.density if args.density is not None else input_density
     process_file(model, args.input, args.output, device, cfg,
-                 use_tta=not args.no_tta, density=density)
+                 use_tta=not args.no_tta,
+                 density=effective_density,
+                 simulate_density=args.density)
 
 
 if __name__ == "__main__":
