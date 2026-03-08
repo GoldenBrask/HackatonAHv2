@@ -291,6 +291,152 @@ def compute_obb(points):
     return center, best_w, best_l, height, best_angle
 
 
+def cable_cluster_geometry(points):
+    """Estimate a 2D line proxy for one cable cluster."""
+    pts_xy = points[:, :2]
+    center_xy = pts_xy.mean(axis=0)
+    centered_xy = pts_xy - center_xy
+
+    if len(points) >= 2:
+        _, _, vh = np.linalg.svd(centered_xy, full_matrices=False)
+        direction = vh[0]
+    else:
+        direction = np.array([1.0, 0.0], dtype=np.float32)
+
+    direction = direction.astype(np.float32)
+    norm = np.linalg.norm(direction)
+    if norm < 1e-6:
+        direction = np.array([1.0, 0.0], dtype=np.float32)
+    else:
+        direction /= norm
+
+    proj = centered_xy @ direction
+    idx_min = int(np.argmin(proj))
+    idx_max = int(np.argmax(proj))
+
+    end_a_xy = center_xy + proj[idx_min] * direction
+    end_b_xy = center_xy + proj[idx_max] * direction
+
+    end_a = np.array([end_a_xy[0], end_a_xy[1], points[idx_min, 2]], dtype=np.float32)
+    end_b = np.array([end_b_xy[0], end_b_xy[1], points[idx_max, 2]], dtype=np.float32)
+
+    return {
+        "center_xy": center_xy.astype(np.float32),
+        "direction": direction,
+        "endpoints": (end_a, end_b),
+    }
+
+
+def cable_merge_metrics(cluster_a, cluster_b):
+    """Return geometric compatibility metrics for two cable clusters."""
+    dot = float(np.clip(np.dot(cluster_a["direction"], cluster_b["direction"]), -1.0, 1.0))
+    angle_deg = float(np.degrees(np.arccos(abs(dot))))
+
+    aligned_dir = cluster_b["direction"] if dot >= 0 else -cluster_b["direction"]
+    axis = cluster_a["direction"] + aligned_dir
+    axis_norm = np.linalg.norm(axis)
+    if axis_norm < 1e-6:
+        axis = cluster_a["direction"]
+    else:
+        axis = axis / axis_norm
+
+    perp = np.array([-axis[1], axis[0]], dtype=np.float32)
+    lateral_offset = abs(np.dot(cluster_b["center_xy"] - cluster_a["center_xy"], perp))
+
+    best_gap_xy = np.inf
+    best_gap_z = np.inf
+    for end_a in cluster_a["endpoints"]:
+        for end_b in cluster_b["endpoints"]:
+            gap_xy = float(np.linalg.norm(end_a[:2] - end_b[:2]))
+            if gap_xy < best_gap_xy:
+                best_gap_xy = gap_xy
+                best_gap_z = abs(float(end_a[2] - end_b[2]))
+
+    return angle_deg, lateral_offset, best_gap_xy, best_gap_z
+
+
+def merge_cable_clusters(clusters, density, cfg):
+    """Merge fragmented cable clusters when geometry strongly suggests continuity."""
+    if len(clusters) <= 1:
+        return clusters
+    if not getattr(cfg, "cable_merge_enabled", False):
+        return clusters
+    if density > getattr(cfg, "cable_merge_max_density", 1.0):
+        return clusters
+
+    density_scale = 1.0 + 0.75 * max(0.0, 1.0 - density)
+    max_angle = float(getattr(cfg, "cable_merge_max_angle_deg", 12.0))
+    max_gap_xy = float(getattr(cfg, "cable_merge_max_endpoint_gap", 3.0)) * density_scale
+    max_lateral = float(getattr(cfg, "cable_merge_max_lateral_offset", 1.25)) * (1.0 + 0.35 * (1.0 - density))
+    max_gap_z = float(getattr(cfg, "cable_merge_max_z_gap", 1.0)) * (1.0 + 0.50 * (1.0 - density))
+
+    parent = list(range(len(clusters)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[rj] = ri
+
+    for i in range(len(clusters)):
+        for j in range(i + 1, len(clusters)):
+            angle_deg, lateral_offset, gap_xy, gap_z = cable_merge_metrics(
+                clusters[i], clusters[j]
+            )
+            if angle_deg > max_angle:
+                continue
+            if lateral_offset > max_lateral:
+                continue
+            if gap_xy > max_gap_xy:
+                continue
+            if gap_z > max_gap_z:
+                continue
+            union(i, j)
+
+    merged = {}
+    for idx, cluster in enumerate(clusters):
+        root = find(idx)
+        merged.setdefault(root, []).append(cluster)
+
+    merged_clusters = []
+    for group in merged.values():
+        if len(group) == 1:
+            merged_clusters.append(group[0])
+            continue
+
+        merged_points = np.vstack([g["points"] for g in group]).astype(np.float32)
+        merged_conf = max(g["confidence"] for g in group)
+        geometry = cable_cluster_geometry(merged_points)
+        merged_clusters.append({
+            "points": merged_points,
+            "confidence": merged_conf,
+            **geometry,
+        })
+
+    return merged_clusters
+
+
+def detection_from_points(points, class_id, cfg):
+    """Convert one cluster of points into the Airbus CSV bbox format."""
+    center, w, l, h, yaw = compute_obb(points)
+    return {
+        "class_ID":      class_id,
+        "class_label":   cfg.class_labels[class_id],
+        "bbox_center_x": float(center[0]),
+        "bbox_center_y": float(center[1]),
+        "bbox_center_z": float(center[2]),
+        "bbox_width":    float(w),
+        "bbox_length":   float(l),
+        "bbox_height":   float(h),
+        "bbox_yaw":      float(yaw),
+    }
+
+
 def get_cluster_settings(class_id, density, cfg):
     """Prepare class-specific clustering settings for the current density."""
     conf_thresholds = getattr(cfg, "confidence_threshold", {})
@@ -405,6 +551,7 @@ def cluster_and_bbox(xyz, pred_classes, cfg, probs=None, density=1.0):
 
         labels = clustering.labels_
         unique_labels = set(labels) - {-1}
+        cable_clusters = []
 
         for label in unique_labels:
             cluster_mask = labels == label
@@ -420,19 +567,23 @@ def cluster_and_bbox(xyz, pred_classes, cfg, probs=None, density=1.0):
                 confidence = float(cls_probs[cluster_mask].mean())
                 if confidence < settings["min_conf"]:
                     continue
+            else:
+                confidence = 0.0
 
-            center, w, l, h, yaw = compute_obb(cluster_points)
-            detections.append({
-                "class_ID":      class_id,
-                "class_label":   cfg.class_labels[class_id],
-                "bbox_center_x": float(center[0]),
-                "bbox_center_y": float(center[1]),
-                "bbox_center_z": float(center[2]),
-                "bbox_width":    float(w),
-                "bbox_length":   float(l),
-                "bbox_height":   float(h),
-                "bbox_yaw":      float(yaw),
-            })
+            if class_id == 1:
+                geometry = cable_cluster_geometry(cluster_points)
+                cable_clusters.append({
+                    "points": cluster_points.astype(np.float32),
+                    "confidence": confidence,
+                    **geometry,
+                })
+            else:
+                detections.append(detection_from_points(cluster_points, class_id, cfg))
+
+        if class_id == 1 and cable_clusters:
+            cable_clusters = merge_cable_clusters(cable_clusters, density, cfg)
+            for cluster in cable_clusters:
+                detections.append(detection_from_points(cluster["points"], class_id, cfg))
 
     return detections
 

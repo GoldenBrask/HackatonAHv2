@@ -194,6 +194,16 @@ class Config:
         3: 0.45,   # Turbine — 0.50→0.45 ✅ validé
     }
 
+    # Merge post-DBSCAN spécifique aux câbles.
+    # Objectif : réunir les segments cassés par les trous de points à faible densité
+    # sans fusionner des câbles parallèles distincts.
+    cable_merge_enabled = True
+    cable_merge_max_density = 0.55   # actif surtout à 25%/50%
+    cable_merge_max_angle_deg = 12.0
+    cable_merge_max_endpoint_gap = 3.0
+    cable_merge_max_lateral_offset = 1.25
+    cable_merge_max_z_gap = 1.0
+
     # ═══════════════════════════════════════════
     # ÉVALUATION — GT extraction (compute_map.py)
     # ═══════════════════════════════════════════
