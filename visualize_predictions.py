@@ -1,4 +1,6 @@
 import argparse
+from pathlib import Path
+
 import numpy as np
 import open3d as o3d
 import pandas as pd
@@ -31,6 +33,10 @@ def parse_args():
                         help="Index of the unique pose to visualize (0-based)")
     parser.add_argument("--cmap", default="turbo", help="Colormap for reflectivity")
     parser.add_argument("--point-size", type=float, default=2.0, help="Open3D point size")
+    parser.add_argument("--output-png", default=None,
+                        help="Chemin PNG de sortie. Si omis, auto-généré en mode headless.")
+    parser.add_argument("--max-points", type=int, default=30000,
+                        help="Nombre max de points affichés dans le rendu PNG headless")
     return parser.parse_args()
 
 
@@ -79,6 +85,30 @@ def make_box_lineset(det):
     color = CLASS_COLORS.get(det["class_label"], [1.0, 1.0, 1.0])
     lineset.colors = o3d.utility.Vector3dVector([color] * len(BOX_EDGES))
     return lineset
+
+
+def projected_box_segments(det, plane):
+    center = np.array([
+        det["bbox_center_x"],
+        det["bbox_center_y"],
+        det["bbox_center_z"],
+    ], dtype=np.float64)
+    corners = bbox_corners(
+        center=center,
+        width=float(det["bbox_width"]),
+        length=float(det["bbox_length"]),
+        height=float(det["bbox_height"]),
+        yaw=float(det["bbox_yaw"]),
+    )
+
+    if plane == "xy":
+        idx = (0, 1)
+    elif plane == "xz":
+        idx = (0, 2)
+    else:
+        raise ValueError(f"Unknown plane: {plane}")
+
+    return [(corners[a][list(idx)], corners[b][list(idx)]) for a, b in BOX_EDGES]
 
 
 def load_pose_table(file_path):
@@ -141,6 +171,57 @@ def build_point_cloud(frame_df, cmap_name):
     return pcd, xyz
 
 
+def choose_output_png(args, pose_index):
+    if args.output_png:
+        return Path(args.output_png)
+    pred_stem = Path(args.pred).stem
+    return Path("sanity_reports") / "previews" / f"{pred_stem}_pose_{pose_index:03d}.png"
+
+
+def export_headless_png(xyz, colors, frame_preds, output_path, max_points):
+    import matplotlib.pyplot as plt
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if len(xyz) > max_points:
+        idx = np.linspace(0, len(xyz) - 1, max_points, dtype=int)
+        xyz_plot = xyz[idx]
+        colors_plot = colors[idx]
+    else:
+        xyz_plot = xyz
+        colors_plot = colors
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7), dpi=150)
+
+    ax_xy, ax_xz = axes
+    ax_xy.scatter(xyz_plot[:, 0], xyz_plot[:, 1], c=colors_plot, s=0.6, linewidths=0, alpha=0.85)
+    ax_xz.scatter(xyz_plot[:, 0], xyz_plot[:, 2], c=colors_plot, s=0.6, linewidths=0, alpha=0.85)
+
+    for _, det in frame_preds.iterrows():
+        color = CLASS_COLORS.get(det["class_label"], [1.0, 1.0, 1.0])
+        for p0, p1 in projected_box_segments(det, "xy"):
+            ax_xy.plot([p0[0], p1[0]], [p0[1], p1[1]], color=color, linewidth=1.4)
+        for p0, p1 in projected_box_segments(det, "xz"):
+            ax_xz.plot([p0[0], p1[0]], [p0[1], p1[1]], color=color, linewidth=1.4)
+
+    ax_xy.set_title("Top View (XY)")
+    ax_xy.set_xlabel("X (m)")
+    ax_xy.set_ylabel("Y (m)")
+    ax_xy.axis("equal")
+    ax_xy.grid(alpha=0.15)
+
+    ax_xz.set_title("Side View (XZ)")
+    ax_xz.set_xlabel("X (m)")
+    ax_xz.set_ylabel("Z (m)")
+    ax_xz.grid(alpha=0.15)
+
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
 def print_detection_summary(frame_preds):
     if len(frame_preds) == 0:
         print("No detections for this pose.")
@@ -191,9 +272,14 @@ def main():
     print_detection_summary(frame_preds)
 
     pcd, xyz = build_point_cloud(frame_df, args.cmap)
+    colors = np.asarray(pcd.colors) if len(pcd.colors) > 0 else np.full((len(xyz), 3), 0.75)
 
     vis = o3d.visualization.Visualizer()
-    vis.create_window(window_name="Predicted Boxes", width=WINDOW_WIDTH, height=WINDOW_HEIGHT)
+    window_ok = vis.create_window(window_name="Predicted Boxes", width=WINDOW_WIDTH, height=WINDOW_HEIGHT)
+    if not window_ok:
+        out_path = export_headless_png(xyz, colors, frame_preds, choose_output_png(args, args.pose_index), args.max_points)
+        print(f"Headless fallback PNG: {out_path}")
+        return
     vis.add_geometry(pcd)
 
     added = 0
@@ -211,6 +297,11 @@ def main():
     print(f"Rendered boxes: {added}")
 
     ctrl = vis.get_view_control()
+    if ctrl is None:
+        vis.destroy_window()
+        out_path = export_headless_png(xyz, colors, frame_preds, choose_output_png(args, args.pose_index), args.max_points)
+        print(f"Headless fallback PNG: {out_path}")
+        return
     cam_pos = np.array([0.0, 0.0, 0.0])
     forward = np.array([1.0, 0.0, 0.0])
     up = np.array([0.0, 0.0, 1.0])
