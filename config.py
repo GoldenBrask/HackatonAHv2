@@ -172,14 +172,14 @@ class Config:
     }
 
     # Adaptive DBSCAN câble selon densité (lookup table par seuil)
-    # Run 11 : à 25%, câble a ~10 points/frame → min_samples=10 bloque tout clustering → 0 TP
-    # Principe : eps inchangé (distance physique constante), seuls min_samples/min_cluster/conf adaptés
-    # Clé = seuil max de densité : apply if density <= threshold
-    # À 25% : un câble de 40 pts à 100% → ~10 pts → besoin de min_samples≤4 pour former des clusters
+    # Les premiers tests sur l'eval set montrent une inflation des détections câble
+    # quand la densité baisse, surtout sur la scène B. On reste donc adaptatif à
+    # basse densité, mais avec des seuils plus conservateurs qu'avant pour limiter
+    # la fragmentation et les FP.
     cable_density_params = {
-        0.30: {"min_samples": 4, "min_cluster": 4, "confidence": 0.35},  # ≤30% densité (~25%)
-        0.55: {"min_samples": 6, "min_cluster": 5, "confidence": 0.40},  # ≤55% densité (~50%)
-        0.80: {"min_samples": 8, "min_cluster": 6, "confidence": 0.43},  # ≤80% densité (~75%)
+        0.30: {"min_samples": 5, "min_cluster": 6, "confidence": 0.40},  # ≤30% (~25%) plus conservateur
+        0.55: {"min_samples": 7, "min_cluster": 6, "confidence": 0.42},  # ≤55% (~50%)
+        0.80: {"min_samples": 8, "min_cluster": 6, "confidence": 0.44},  # ≤80% (~75%)
         # >80% → params normaux (min_samples=10, min_cluster=8, confidence=0.45)
     }
 

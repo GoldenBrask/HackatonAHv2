@@ -291,90 +291,6 @@ def compute_obb(points):
     return center, best_w, best_l, height, best_angle
 
 
-def cluster_and_bbox_legacy(xyz, pred_classes, cfg, probs=None, density=1.0):
-    """
-    Pour chaque classe (0-3), DBSCAN sur les points prédits,
-    puis OBB sur chaque cluster.
-
-    probs   : (N, num_classes) probabilités softmax — filtre par confiance.
-    density : ratio [0.25-1.0] — adapte les params câble via lookup table.
-              eps INCHANGÉ (distance physique constante quelle que soit la densité).
-    Returns : liste de dicts avec les infos bounding box.
-    """
-    conf_thresholds = getattr(cfg, "confidence_threshold", {})
-    detections = []
-
-    for class_id in range(4):  # Seulement 0-3 (pas background)
-        min_pts     = cfg.min_cluster_points.get(class_id, 10)
-        min_conf    = conf_thresholds.get(class_id, 0.0)
-        params      = cfg.dbscan_params[class_id]
-        min_samples = params["min_samples"]
-
-        # Adaptive params à faible densité.
-        # Lookup tables conservatrices par classe: on n'adapte que les seuils
-        # qui deviennent structurellement trop stricts quand le nombre de points
-        # chute, tout en gardant eps constant (distance physique inchangée).
-        density_overrides = {}
-        if class_id == 0:
-            density_overrides = getattr(cfg, "antenna_density_params", {})
-        elif class_id == 1:
-            density_overrides = getattr(cfg, "cable_density_params", {})
-
-        if density_overrides and density < 0.99:
-            for threshold in sorted(density_overrides.keys()):
-                if density <= threshold:
-                    ap          = density_overrides[threshold]
-                    min_samples = ap["min_samples"]
-                    min_pts     = ap["min_cluster"]
-                    min_conf    = ap["confidence"]
-                    break
-
-        mask = pred_classes == class_id
-        if mask.sum() < min_pts:
-            continue
-
-        points    = xyz[mask]
-        cls_probs = probs[mask, class_id] if probs is not None else None
-
-        clustering = DBSCAN(
-            eps=params["eps"],
-            min_samples=min_samples,
-            n_jobs=-1,
-        ).fit(points)
-
-        labels        = clustering.labels_
-        unique_labels = set(labels) - {-1}  # Exclure bruit
-
-        for label in unique_labels:
-            cluster_mask   = labels == label
-            cluster_points = points[cluster_mask]
-
-            if len(cluster_points) < min_pts:
-                continue
-
-            # Filtre par score de confiance (moyenne des probas du cluster)
-            if cls_probs is not None and min_conf > 0.0:
-                confidence = float(cls_probs[cluster_mask].mean())
-                if confidence < min_conf:
-                    continue
-
-            center, w, l, h, yaw = compute_obb(cluster_points)
-
-            detections.append({
-                "class_ID":      class_id,
-                "class_label":   cfg.class_labels[class_id],
-                "bbox_center_x": float(center[0]),
-                "bbox_center_y": float(center[1]),
-                "bbox_center_z": float(center[2]),
-                "bbox_width":    float(w),
-                "bbox_length":   float(l),
-                "bbox_height":   float(h),
-                "bbox_yaw":      float(yaw),
-            })
-
-    return detections
-
-
 def get_cluster_settings(class_id, density, cfg):
     """Prepare class-specific clustering settings for the current density."""
     conf_thresholds = getattr(cfg, "confidence_threshold", {})
@@ -465,12 +381,6 @@ def build_candidate_masks(xyz, pred_classes, probs, class_id, settings):
 
 def cluster_and_bbox(xyz, pred_classes, cfg, probs=None, density=1.0):
     """Extract obstacle instances and convert them to oriented boxes."""
-    use_probabilistic = bool(getattr(cfg, "use_probabilistic_clustering", True))
-    if not use_probabilistic:
-        return cluster_and_bbox_legacy(
-            xyz, pred_classes, cfg, probs=probs, density=density
-        )
-
     detections = []
 
     for class_id in range(4):
@@ -691,19 +601,14 @@ def main():
                         help="Simule une densité cible [0.25|0.50|0.75|1.0] "
                              "par sous-échantillonnage supplémentaire. "
                              "À utiliser pour tester la robustesse depuis un fichier 100%.")
-    parser.add_argument("--legacy-clustering", action="store_true",
-                        help="Revenir au DBSCAN legacy sur l'argmax brut")
     args = parser.parse_args()
 
     cfg = Config()
     cfg.ensure_dirs()
-    cfg.use_probabilistic_clustering = not args.legacy_clustering
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
-    print("Clustering: " + (
-        "probabilistic-v3" if cfg.use_probabilistic_clustering else "legacy-dbscan"
-    ))
+    print("Clustering: probabilistic-v3")
 
     model = load_model(args.checkpoint, device, cfg)
     input_density = resolve_input_density(args.input)

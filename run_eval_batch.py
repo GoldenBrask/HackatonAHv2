@@ -1,16 +1,14 @@
 """
-Lance l'inference sur tout l'eval set Airbus en une commande.
+Lance l'inference probabilistic sur tout l'eval set Airbus en une commande.
 
 Fonctionnalites:
   - traite sceneA/sceneB et densites 100/75/50/25
-  - supporte les modes probabilistic, legacy, ou les deux
-  - ecrit les CSV dans des sous-dossiers par mode
+  - ecrit les CSV dans un dossier unique
   - genere un summary.csv avec le nombre de detections par classe
 
 Usage:
   python run_eval_batch.py --checkpoint checkpoints/best_model.pth
-  python run_eval_batch.py --checkpoint checkpoints/best_model.pth --mode both
-  python run_eval_batch.py --checkpoint checkpoints/best_model.pth --mode legacy --dry-run
+  python run_eval_batch.py --checkpoint checkpoints/best_model.pth --dry-run
 """
 from __future__ import annotations
 
@@ -51,12 +49,6 @@ def parse_args() -> argparse.Namespace:
         help="Executable Python a utiliser pour lancer inference.py",
     )
     parser.add_argument(
-        "--mode",
-        choices=("probabilistic", "legacy", "both"),
-        default="probabilistic",
-        help="Variante de clustering a lancer",
-    )
-    parser.add_argument(
         "--no-tta",
         action="store_true",
         help="Passe --no-tta a inference.py",
@@ -72,14 +64,6 @@ def parse_args() -> argparse.Namespace:
         help="Affiche les commandes sans les executer",
     )
     return parser.parse_args()
-
-
-def selected_modes(mode_arg: str) -> list[str]:
-    if mode_arg == "both":
-        return ["probabilistic", "legacy"]
-    return [mode_arg]
-
-
 def expected_eval_files(eval_dir: Path) -> list[Path]:
     return [
         eval_dir / f"eval_scene{scene}_{density}.h5"
@@ -93,7 +77,6 @@ def build_command(
     input_path: Path,
     output_path: Path,
     checkpoint: Path,
-    mode: str,
     no_tta: bool,
 ) -> list[str]:
     cmd = [
@@ -108,8 +91,6 @@ def build_command(
     ]
     if no_tta:
         cmd.append("--no-tta")
-    if mode == "legacy":
-        cmd.append("--legacy-clustering")
     return cmd
 
 
@@ -159,13 +140,13 @@ def write_summary(summary_rows: list[dict[str, object]], output_dir: Path) -> No
 def print_summary(summary_rows: list[dict[str, object]]) -> None:
     print("\nResume des sorties")
     print(
-        f"{'Mode':<14} {'File':<20} {'Det':>6} {'Ant':>6} {'Cab':>6} "
+        f"{'File':<20} {'Det':>6} {'Ant':>6} {'Cab':>6} "
         f"{'Pole':>6} {'Turb':>6} {'Status':>10}"
     )
-    print("-" * 82)
+    print("-" * 67)
     for row in summary_rows:
         print(
-            f"{row['mode']:<14} {row['file']:<20} {row['num_detections']:>6} "
+            f"{row['file']:<20} {row['num_detections']:>6} "
             f"{row['antenna']:>6} {row['cable']:>6} {row['electric_pole']:>6} "
             f"{row['wind_turbine']:>6} {row['status']:>10}"
         )
@@ -190,61 +171,58 @@ def main() -> None:
 
     summary_rows: list[dict[str, object]] = []
 
-    for mode in selected_modes(args.mode):
-        mode_dir = output_root / mode
-        mode_dir.mkdir(parents=True, exist_ok=True)
+    output_root.mkdir(parents=True, exist_ok=True)
 
-        for scene in SCENES:
-            for density in DENSITIES:
-                input_path = eval_dir / f"eval_scene{scene}_{density}.h5"
-                output_path = mode_dir / f"eval_scene{scene}_{density}.csv"
-                cmd = build_command(
-                    python_exe=args.python,
-                    input_path=input_path,
-                    output_path=output_path,
-                    checkpoint=checkpoint,
-                    mode=mode,
-                    no_tta=args.no_tta,
-                )
+    for scene in SCENES:
+        for density in DENSITIES:
+            input_path = eval_dir / f"eval_scene{scene}_{density}.h5"
+            output_path = output_root / f"eval_scene{scene}_{density}.csv"
+            cmd = build_command(
+                python_exe=args.python,
+                input_path=input_path,
+                output_path=output_path,
+                checkpoint=checkpoint,
+                no_tta=args.no_tta,
+            )
 
-                status = "skipped"
-                elapsed = 0.0
+            status = "skipped"
+            elapsed = 0.0
 
-                print(f"\n[{mode}] {input_path.name} -> {output_path}")
-                if output_path.exists() and not args.overwrite:
-                    print("CSV deja present, skip (utilise --overwrite pour relancer).")
+            print(f"\n{input_path.name} -> {output_path}")
+            if output_path.exists() and not args.overwrite:
+                print("CSV deja present, skip (utilise --overwrite pour relancer).")
+            else:
+                print("Commande:", " ".join(cmd))
+                if not args.dry_run:
+                    t0 = time.time()
+                    subprocess.run(cmd, check=True)
+                    elapsed = time.time() - t0
+                    status = "done"
                 else:
-                    print("Commande:", " ".join(cmd))
-                    if not args.dry_run:
-                        t0 = time.time()
-                        subprocess.run(cmd, check=True)
-                        elapsed = time.time() - t0
-                        status = "done"
-                    else:
-                        status = "dry-run"
+                    status = "dry-run"
 
-                if output_path.exists() and not args.dry_run:
-                    stats = summarize_predictions(output_path)
-                else:
-                    stats = {
-                        "num_detections": 0,
-                        "antenna": 0,
-                        "cable": 0,
-                        "electric_pole": 0,
-                        "wind_turbine": 0,
-                    }
+            if output_path.exists() and not args.dry_run:
+                stats = summarize_predictions(output_path)
+            else:
+                stats = {
+                    "num_detections": 0,
+                    "antenna": 0,
+                    "cable": 0,
+                    "electric_pole": 0,
+                    "wind_turbine": 0,
+                }
 
-                summary_rows.append(
-                    {
-                        "mode": mode,
-                        "file": input_path.name,
-                        "scene": scene,
-                        "density": density,
-                        "elapsed_sec": round(elapsed, 2),
-                        "status": status,
-                        **stats,
-                    }
-                )
+            summary_rows.append(
+                {
+                    "mode": "probabilistic",
+                    "file": input_path.name,
+                    "scene": scene,
+                    "density": density,
+                    "elapsed_sec": round(elapsed, 2),
+                    "status": status,
+                    **stats,
+                }
+            )
 
     write_summary(summary_rows, output_root)
     print_summary(summary_rows)
