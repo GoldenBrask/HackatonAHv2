@@ -32,6 +32,8 @@ CLASS_COLUMNS = {
     "Electric Pole": "pole_count",
     "Wind Turbine": "turbine_count",
 }
+POSE_POSITION_TOL = 1e-2
+POSE_YAW_TOL = 1e-3
 
 
 def parse_args() -> argparse.Namespace:
@@ -100,6 +102,82 @@ def flag_string(row: pd.Series) -> str:
     return ",".join(flags)
 
 
+def attach_pose_index(pred_df: pd.DataFrame, poses: pd.DataFrame) -> pd.DataFrame:
+    """Attach pose_index to predictions with tolerance for CSV float roundtrips."""
+    pred_with_pose = pred_df.merge(
+        poses[["pose_index", *POSE_FIELDS]],
+        on=POSE_FIELDS,
+        how="left",
+        validate="many_to_one",
+    )
+    if not pred_with_pose["pose_index"].isna().any():
+        pred_with_pose["pose_index"] = pred_with_pose["pose_index"].astype(int)
+        return pred_with_pose
+
+    pose_values = poses[POSE_FIELDS].to_numpy(dtype=np.float64)
+    unique_pred_poses = pred_df[POSE_FIELDS].drop_duplicates().reset_index(drop=True)
+    pose_mapping = []
+    unresolved = []
+
+    for _, pose_row in unique_pred_poses.iterrows():
+        pred_pose = pose_row[POSE_FIELDS].to_numpy(dtype=np.float64)
+        deltas = np.abs(pose_values - pred_pose)
+
+        mask = (
+            (deltas[:, 0] <= POSE_POSITION_TOL)
+            & (deltas[:, 1] <= POSE_POSITION_TOL)
+            & (deltas[:, 2] <= POSE_POSITION_TOL)
+            & (deltas[:, 3] <= POSE_YAW_TOL)
+        )
+
+        if not mask.any():
+            best_idx = int(np.argmin(deltas[:, :3].max(axis=1) + 100.0 * deltas[:, 3]))
+            unresolved.append({
+                **{field: float(pose_row[field]) for field in POSE_FIELDS},
+                "best_dx": float(deltas[best_idx, 0]),
+                "best_dy": float(deltas[best_idx, 1]),
+                "best_dz": float(deltas[best_idx, 2]),
+                "best_dyaw": float(deltas[best_idx, 3]),
+            })
+            continue
+
+        candidate_idx = np.where(mask)[0]
+        if len(candidate_idx) > 1:
+            score = deltas[candidate_idx, :3].sum(axis=1) + 100.0 * deltas[candidate_idx, 3]
+            best_local = candidate_idx[int(np.argmin(score))]
+        else:
+            best_local = int(candidate_idx[0])
+
+        pose_mapping.append({
+            **{field: float(pose_row[field]) for field in POSE_FIELDS},
+            "pose_index": int(poses.iloc[best_local]["pose_index"]),
+        })
+
+    if unresolved:
+        example = unresolved[0]
+        raise ValueError(
+            "Impossible d'associer certaines prédictions à une pose. "
+            f"Exemple: ego=({example['ego_x']}, {example['ego_y']}, "
+            f"{example['ego_z']}, {example['ego_yaw']}) | "
+            f"best deltas=({example['best_dx']:.6f}, {example['best_dy']:.6f}, "
+            f"{example['best_dz']:.6f}, {example['best_dyaw']:.6f})"
+        )
+
+    pose_mapping_df = pd.DataFrame(pose_mapping)
+    pred_with_pose = pred_df.merge(
+        pose_mapping_df,
+        on=POSE_FIELDS,
+        how="left",
+        validate="many_to_one",
+    )
+    if pred_with_pose["pose_index"].isna().any():
+        missing = int(pred_with_pose["pose_index"].isna().sum())
+        raise ValueError(f"Appariement tolérant incomplet: {missing} prédictions sans pose_index")
+
+    pred_with_pose["pose_index"] = pred_with_pose["pose_index"].astype(int)
+    return pred_with_pose
+
+
 def build_frame_report(scene_path: Path, pred_path: Path) -> tuple[pd.DataFrame, dict[str, object]]:
     scene_df = lidar_utils.load_h5_data(scene_path)
     scene_df = scene_df[scene_df["distance_cm"] > 0].copy()
@@ -134,17 +212,7 @@ def build_frame_report(scene_path: Path, pred_path: Path) -> tuple[pd.DataFrame,
         }
         return report, summary
 
-    pred_with_pose = pred_df.merge(
-        poses[["pose_index", *POSE_FIELDS]],
-        on=POSE_FIELDS,
-        how="left",
-        validate="many_to_one",
-    )
-    if pred_with_pose["pose_index"].isna().any():
-        missing = int(pred_with_pose["pose_index"].isna().sum())
-        raise ValueError(f"{pred_path}: {missing} prédictions sans pose_index correspondant")
-
-    pred_with_pose["pose_index"] = pred_with_pose["pose_index"].astype(int)
+    pred_with_pose = attach_pose_index(pred_df, poses)
 
     counts = (
         pred_with_pose.groupby(["pose_index", "class_label"])
